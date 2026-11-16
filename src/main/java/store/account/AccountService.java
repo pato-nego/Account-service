@@ -55,8 +55,11 @@ public class AccountService {
         }
 
         final String hash = calcHash(password);
+        // wrong credentials are a 401, not the 500 of a bare orElseThrow()
         return accountRepository.findByEmailAndHashPassword(email, hash)
-            .orElseThrow()
+            .orElseThrow(() -> new ResponseStatusException(
+                HttpStatus.UNAUTHORIZED, "Invalid credentials"
+            ))
             .to();
             
     }
