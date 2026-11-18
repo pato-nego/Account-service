@@ -6,7 +6,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.List;
 
+import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -28,7 +30,7 @@ public class AccountService {
         final String pass = account.password().trim();
         if (pass.length() < 6) {
             throw new ResponseStatusException(
-                HttpStatus.BAD_REQUEST, "Password must be more than 6 caracters"
+                HttpStatus.BAD_REQUEST, "Password must be at least 6 characters"
             );
         }
 
@@ -38,12 +40,17 @@ public class AccountService {
             );
         }
 
-        // agora calcula o hash
         account.hashPassword(calcHash(pass));
 
-        return accountRepository.save(
-            new AccountModel(account)
-        ).to();
+        try {
+            return accountRepository.save(new AccountModel(account)).to();
+        } catch (DataIntegrityViolationException e) {
+            if (e.getCause() instanceof ConstraintViolationException violation
+                    && "accounts_email_key".equals(violation.getConstraintName())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Email already registered", e);
+            }
+            throw e;
+        }
     }
 
     public Account findByEmailAndPassword(String email, String password) {
@@ -55,7 +62,6 @@ public class AccountService {
         }
 
         final String hash = calcHash(password);
-        // wrong credentials are a 401, not the 500 of a bare orElseThrow()
         return accountRepository.findByEmailAndHashPassword(email, hash)
             .orElseThrow(() -> new ResponseStatusException(
                 HttpStatus.UNAUTHORIZED, "Invalid credentials"
@@ -66,7 +72,7 @@ public class AccountService {
 
     public Account findById(String id) {
         return accountRepository.findById(id)
-            .orElse(null)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Account not found"))
             .to();
     }
 
