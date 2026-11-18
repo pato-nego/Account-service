@@ -5,16 +5,25 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 import java.util.List;
+import java.util.UUID;
 
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.crypto.password.Pbkdf2PasswordEncoder;
+import org.springframework.security.crypto.password.Pbkdf2PasswordEncoder.SecretKeyFactoryAlgorithm;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class AccountService {
+
+    private static final String PASSWORD_HASH_PREFIX = "{pbkdf2-sha256-600000}";
+    private static final Pbkdf2PasswordEncoder PASSWORD_ENCODER = new Pbkdf2PasswordEncoder(
+        "", 16, 600_000, SecretKeyFactoryAlgorithm.PBKDF2WithHmacSHA256
+    );
+    private static final String UNKNOWN_ACCOUNT_HASH = PASSWORD_ENCODER.encode(UUID.randomUUID().toString());
 
     @Autowired
     private AccountRepository accountRepository;
@@ -40,7 +49,7 @@ public class AccountService {
             );
         }
 
-        account.hashPassword(calcHash(pass));
+        account.hashPassword(PASSWORD_HASH_PREFIX + PASSWORD_ENCODER.encode(pass));
 
         try {
             return accountRepository.save(new AccountModel(account)).to();
@@ -61,13 +70,31 @@ public class AccountService {
             );
         }
 
-        final String hash = calcHash(password);
-        return accountRepository.findByEmailAndHashPassword(email, hash)
-            .orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.UNAUTHORIZED, "Invalid credentials"
-            ))
-            .to();
-            
+        Account account = accountRepository.findByEmail(email).map(AccountModel::to).orElse(null);
+        if (account == null) {
+            PASSWORD_ENCODER.matches(password, UNKNOWN_ACCOUNT_HASH);
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
+        }
+
+        String storedHash = account.hashPassword();
+        boolean legacy = !storedHash.startsWith(PASSWORD_HASH_PREFIX);
+        boolean valid = legacy
+            ? MessageDigest.isEqual(legacyHash(password).getBytes(StandardCharsets.US_ASCII),
+                storedHash.getBytes(StandardCharsets.US_ASCII))
+            : PASSWORD_ENCODER.matches(password, storedHash.substring(PASSWORD_HASH_PREFIX.length()));
+        if (!valid) {
+            if (legacy) {
+                PASSWORD_ENCODER.matches(password, UNKNOWN_ACCOUNT_HASH);
+            }
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
+        }
+
+        if (legacy) {
+            accountRepository.upgradePasswordHash(
+                account.id(), storedHash, PASSWORD_HASH_PREFIX + PASSWORD_ENCODER.encode(password)
+            );
+        }
+        return account;
     }
 
     public Account findById(String id) {
@@ -86,7 +113,8 @@ public class AccountService {
             .toList();
     }
 
-    private String calcHash(String text) {
+    // shortcut: retain legacy verification until remaining SHA-256 passwords are reset.
+    private String legacyHash(String text) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             md.update(text.getBytes(StandardCharsets.UTF_8));
