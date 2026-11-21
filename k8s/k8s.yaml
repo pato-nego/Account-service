@@ -1,9 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: account-config
+data:
+  DATABASE_PORT: '5432'
+  SPRING_DATASOURCE_URL: 'jdbc:postgresql://${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_DB}?sslmode=verify-full&sslrootcert=/etc/rds/bundle.pem'
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: account-credentials
+type: Opaque
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: account
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: account
@@ -12,59 +25,82 @@ spec:
       labels:
         app: account
     spec:
+      automountServiceAccountToken: false
+      volumes:
+      - name: rds-trust
+        configMap:
+          name: rds-ca
       containers:
-          - name: account
-            image: humbertosandmann/account:latest
-            imagePullPolicy: Always
-            ports:
-              - containerPort: 8080
-            resources:
-              requests:
-                memory: "256Mi"
-                cpu: "250m"
-              limits:
-                memory: "512Mi"
-                cpu: "500m"
-            env:
-
-              - name: DATABASE_HOST
-                valueFrom:
-                  configMapKeyRef:
-                    name: postgres-configmap
-                    key: POSTGRES_HOST
-
-              - name: DATABASE_DB
-                valueFrom:
-                  configMapKeyRef:
-                    name: postgres-configmap
-                    key: POSTGRES_DB
-
-              - name: DATABASE_PORT
-                value: "5432"
-
-              - name: DATABASE_USERNAME
-                valueFrom:
-                  secretKeyRef:
-                    name: postgres-secrets
-                    key: POSTGRES_USER
-
-              - name: DATABASE_PASSWORD
-                valueFrom:
-                  secretKeyRef:
-                    name: postgres-secrets
-                    key: POSTGRES_PASSWORD
-
+      - name: account
+        image: pato-nego/account:local
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        volumeMounts:
+        - name: rds-trust
+          mountPath: /etc/rds
+          readOnly: true
+        envFrom:
+        - configMapRef:
+            name: account-config
+        env:
+        - name: DATABASE_HOST
+          valueFrom:
+            secretKeyRef:
+              name: account-credentials
+              key: DATABASE_HOST
+        - name: DATABASE_DB
+          valueFrom:
+            secretKeyRef:
+              name: account-credentials
+              key: DATABASE_DB
+        - name: DATABASE_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: account-credentials
+              key: DATABASE_USERNAME
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: account-credentials
+              key: DATABASE_PASSWORD
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+        startupProbe:
+          httpGet:
+            path: /accounts/health-check
+            port: http
+          timeoutSeconds: 3
+          periodSeconds: 5
+          failureThreshold: 36
+        readinessProbe:
+          httpGet:
+            path: /accounts/health-check
+            port: http
+          timeoutSeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /accounts/health-check
+            port: http
+          timeoutSeconds: 3
+          periodSeconds: 15
+  replicas: 1
 ---
-
 apiVersion: v1
 kind: Service
 metadata:
   name: account
 spec:
+  type: ClusterIP
   selector:
     app: account
   ports:
-    - protocol: TCP
-      port: 8080
-      targetPort: 8080
-  type: ClusterIP
+  - name: http
+    port: 8080
+    targetPort: http
